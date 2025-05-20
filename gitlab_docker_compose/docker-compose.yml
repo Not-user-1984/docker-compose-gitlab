@@ -1,0 +1,170 @@
+services:
+  postgres:
+    image: postgres:14
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "work_mem=4MB"
+      - "-c"
+      - "effective_cache_size=768MB"
+      - "-c"
+      - "max_connections=50"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks:
+      - gitlab_net
+    mem_limit: 512m
+    memswap_limit: 512m
+
+  gitlab:
+    image: gitlab/gitlab-ce:latest
+    hostname: gitlab
+    restart: unless-stopped
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://localhost'
+        gitlab_rails['gitlab_shell_ssh_port'] = ${GITLAB_SSH_PORT}
+        gitlab_rails['initial_root_password'] = '${GITLAB_ROOT_PASSWORD}'
+        gitlab_rails['db_adapter'] = '${DB_ADAPTER}'
+        gitlab_rails['db_host'] = '${DB_HOST}'
+        gitlab_rails['db_port'] = '${DB_PORT}'
+        gitlab_rails['db_database'] = '${DB_DATABASE}'
+        gitlab_rails['db_username'] = '${DB_USERNAME}'
+        gitlab_rails['db_password'] = '${DB_PASSWORD}'
+        gitlab_rails['puma_workers'] = 1
+        gitlab_rails['puma_threads_min'] = 1
+        gitlab_rails['puma_threads_max'] = 2
+        gitlab_rails['puma_phased_restart'] = true
+        gitlab_rails['env'] = {
+          'MALLOC_ARENA_MAX' => '2',
+          'RUBY_GC_HEAP_INIT_SLOTS' => '500000',
+          'RUBY_GC_HEAP_FREE_SLOTS' => '100000',
+          'MALLOC_CONF' => 'dirty_decay_ms:1000,muzzy_decay_ms:1000'
+        }
+        prometheus_monitoring['enable'] = false
+        grafana['enable'] = false
+        sidekiq['concurrency'] = 10
+        gitlab_rails['backup_cron_schedule'] = '0 2 * * *'
+    ports:
+      - "8000:80"
+      - "${GITLAB_SSH_PORT}:22"
+    volumes:
+      - ./data/docker/gitlab/etc/gitlab:/etc/gitlab
+      - ./data/docker/gitlab/var/opt/gitlab:/var/opt/gitlab
+      - ./data/docker/gitlab/var/log/gitlab:/var/log/gitlab
+      - ./data/backups:/var/opt/gitlab/backups
+    networks:
+      - gitlab_net
+    depends_on:
+      - postgres
+    mem_limit: 4g
+    memswap_limit: 4g
+
+  dind:
+    image: docker:20-dind
+    restart: always
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    command:
+      - --storage-driver=overlay2
+    volumes:
+      - ./data/dind/docker:/var/lib/docker
+    networks:
+      - gitlab_net
+    depends_on:
+      - gitlab
+    mem_limit: 1g
+    memswap_limit: 1g
+
+  # gitlab-runner:
+  #   image: gitlab/gitlab-runner:alpine
+  #   restart: unless-stopped
+  #   environment:
+  #     - DOCKER_HOST=tcp://dind:2375
+  #     - CI_CONCURRENT=2
+  #   volumes:
+  #     - ./config:/etc/gitlab-runner:z
+  #     - ./data/runner/cache:/cache
+  #   networks:
+  #     - gitlab_net
+  #   depends_on:
+  #     - gitlab
+  #     - dind
+  #   mem_limit: 512m
+  #   memswap_limit: 512m
+
+  # register-runner:
+  #   restart: "no"
+  #   image: gitlab/gitlab-runner:alpine
+  #   environment:
+  #     - REGISTRATION_TOKEN=${REGISTRATION_TOKEN}
+  #     - CI_SERVER_URL=${GITLAB_RUNNER_URL}
+  #     - RUNNER_NAME=${RUNNER_NAME}
+  #   command:
+  #     - register
+  #     - --non-interactive
+  #     - --locked=false
+  #     - --name=${RUNNER_NAME}
+  #     - --executor=docker
+  #     - --url=${GITLAB_RUNNER_URL}
+  #     - --clone-url=${GITLAB_RUNNER_URL}
+  #     - --docker-image=docker:20-dind
+  #     - --docker-volumes=/var/lib/docker:/var/lib/docker
+  #   volumes:
+  #     - ./config:/etc/gitlab-runner:z
+  #   networks:
+  #     - gitlab_net
+  #   depends_on:
+  #     - dind
+  #     - gitlab
+  #   mem_limit: 256m
+  #   memswap_limit: 256m
+
+  register-ssh-runner:
+    restart: "no"
+    image: gitlab/gitlab-runner:alpine
+    environment:
+      - REGISTRATION_TOKEN=${REGISTRATION_TOKEN}
+      - CI_SERVER_URL=${GITLAB_RUNNER_URL}
+      - RUNNER_NAME=${RUNNER_NAME_SSH}
+    command:
+      - register
+      - --non-interactive
+      - --locked=false
+      - --name=${RUNNER_NAME_SSH}
+      - --executor=ssh
+      - --url=${GITLAB_RUNNER_URL}
+      - --tag-list=deploy
+    volumes:
+      - ./config-ssh:/etc/gitlab-runner:z
+    networks:
+      - gitlab_net
+    depends_on:
+      - gitlab
+    mem_limit: 256m
+    memswap_limit: 256m
+
+  gitlab-runner-ssh:
+    image: gitlab/gitlab-runner:alpine
+    restart: unless-stopped
+    volumes:
+      - ./config-ssh:/etc/gitlab-runner:z
+      - /path/to/ssh/key:/root/.ssh/id_rsa_proxmox:ro
+    networks:
+      - gitlab_net
+    depends_on:
+      - gitlab
+    mem_limit: 512m
+    memswap_limit: 512m
+
+networks:
+  gitlab_net:
+    name: gitlab_net
